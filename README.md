@@ -134,3 +134,42 @@ python scripts/make_contact_sheet.py --data data/train --n 60 --cols 2
 The HTML is written inside the split folder so the relative `images/...` paths
 resolve — don't move it out of that folder or the images won't load.
 
+# Training the tokenizer
+
+The model predicts a *sequence of tokens*, so we need a tokenizer that maps
+Typst strings to integer IDs and back. For v1 this is **char-level**: Typst math
+is a small, closed alphabet, so the vocabulary is tiny and there is zero
+out-of-vocabulary risk. It is built from the **train split only** (building it
+on val/test would leak information about the eval sets):
+
+```bash
+python scripts/train_tokenizer.py --data data
+```
+
+This writes `data/tokenizer.json` and prints stats you'll need for the model:
+
+```
+vocab size      : 54 (50 chars + 4 specials)
+max seq length  : 98 tokens (use as decoder max_length)
+round-trip loss : 0 mismatches (lossless ✓)
+OOV in val/test : none ✓ (2000 eval labels checked)
+```
+
+| flag | default | meaning |
+|------|---------|---------|
+| `--data` | `data` | dataset directory (holds `train/ val/ test/`) |
+| `--out` | `<data>/tokenizer.json` | output path for the tokenizer JSON |
+
+Reuse it in code with:
+
+```python
+from im2typst.tokenizer import CharTokenizer
+tok = CharTokenizer.load("data/tokenizer.json")
+ids = tok.encode("x^(2) + 1")   # [<bos>, …, <eos>]
+tok.decode(ids)                 # 'x^(2) + 1'
+```
+
+The four special tokens occupy fixed IDs: `<pad>`=0, `<bos>`=1, `<eos>`=2,
+`<unk>`=3. If `train_tokenizer.py` reports any OOV characters in val/test,
+enlarge the training set so the tokenizer covers them before training.
+
