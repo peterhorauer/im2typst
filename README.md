@@ -4,6 +4,14 @@ A formula screenshot to typst math converter
 # goal
 The goal is to create a image 2 typst converter which is able to take any formula found online and easily convert it into a typst formula.
 
+# TODO
+Add all kinds of mathematical and informatical, as well as physical characters and calculations to dataset generation
+- First do so with typst characters as input only.
+- Afterwards expand to LaTeX and other characters if needed.
+
+Change the Character Tokenizer to be a BPE tokenizer to support "sqrt" as a token for example.
+
+
 # Python Environment setup
 
 First create the python environment
@@ -58,7 +66,7 @@ python scripts/demo_generate.py --n 20 --max-depth 4 --seed 0
 
 ## Render a dataset
 
-Generate the actual `(image, label)` pairs, partitioned into disjoint
+Generate the actual `(image, label)` pairs, partitioned into disjointREADME.md
 train/val/test splits:
 
 ```bash
@@ -172,4 +180,64 @@ tok.decode(ids)                 # 'x^(2) + 1'
 The four special tokens occupy fixed IDs: `<pad>`=0, `<bos>`=1, `<eos>`=2,
 `<unk>`=3. If `train_tokenizer.py` reports any OOV characters in val/test,
 enlarge the training set so the tokenizer covers them before training.
+
+# Training the model
+
+The model is a **Vision Encoder-Decoder**: a pretrained **TrOCR** image encoder
+(reused as-is, along with its bundled image processor) paired with a decoder
+whose vocabulary is resized to **our** char-level tokenizer. The vision side and
+the text side are independent, so the tokenizer can be swapped later without
+touching the encoder.
+
+Three pieces make it up:
+
+- `im2typst/data.py` — `FormulaDataset`: loads each PNG → pixel tensor (image
+  processor) and encodes its Typst label → token IDs (tokenizer).
+- `im2typst/model.py` — `build_model`: loads pretrained TrOCR and re-points its
+  decoder at our vocab.
+- `scripts/train_model.py` — the training entry point.
+
+> **Training strategy, milestone tracking, and results** live in
+> [TRAINING.md](TRAINING.md) — read it for the plan beyond the first run.
+
+## Overfit smoke test
+
+Before any large run, prove the pipeline learns by overfitting a small subset —
+loss should collapse toward zero and the model should reproduce those exact
+labels. If it can't overfit a handful of examples, something is miswired.
+
+```bash
+python scripts/train_model.py --data data --n 16 --epochs 80
+```
+
+The first run downloads the pretrained TrOCR checkpoint (a few hundred MB). It
+prints the per-epoch loss, then generates a few train images and reports how
+many decode back to the exact gold label (`Exact match: N/M`). See
+[TRAINING.md](TRAINING.md) for the milestone-1 result and what comes next.
+
+| flag | default | meaning |
+|------|---------|---------|
+| `--data` | `data` | dataset directory (needs `train/` + `tokenizer.json`) |
+| `--n` | 200 | how many train examples to use |
+| `--epochs` | 30 | passes over the subset |
+| `--batch-size` | 4 | examples per step |
+| `--lr` | 5e-5 | AdamW learning rate |
+| `--max-length` | 128 | decoder max sequence length |
+| `--trocr` | `microsoft/trocr-small-printed` | pretrained encoder/decoder checkpoint |
+| `--device` | `cpu` | `cpu` or `cuda` |
+| `--eval-samples` | 5 | train examples to decode after training |
+| `--save` | none | optional directory to save the model + tokenizer |
+
+## Full training
+
+The code is device-agnostic — pass `--device cuda` on a GPU machine and raise
+`--n` to cover the whole train split (8000 for the default dataset):
+
+```bash
+python scripts/train_model.py --data data --device cuda --n 8000 --epochs 10 --save runs/trocr-v1
+```
+
+CPU is fine for the overfit smoke test, but a real run over the full 8k train
+set wants a **cloud GPU (CUDA)** — an integrated GPU is not worth the ROCm
+setup. Move the run to Colab or a rented GPU for the full fit.
 
