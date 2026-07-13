@@ -58,29 +58,79 @@ python scripts/demo_generate.py --n 20 --max-depth 4 --seed 0
 
 ## Render a dataset
 
-Generate the actual `(image, label)` pairs:
+Generate the actual `(image, label)` pairs, partitioned into disjoint
+train/val/test splits:
 
 ```bash
-python scripts/generate_dataset.py --n 1000 --out data --seed 0 --unique
+python scripts/generate_dataset.py --n 10000 --out data --seed 0
 ```
 
-This writes:
+This writes one folder per split, each with its own images and manifest:
 
 ```
 data/
-├── images/000000.png, 000001.png, …
-└── labels.jsonl        # one {"image": "images/000000.png", "typst": "..."} per line
+├── train/
+│   ├── images/000000.png, 000001.png, …
+│   └── labels.jsonl   # one {"image": "images/000000.png", "typst": "..."} per line
+├── val/
+│   ├── images/…
+│   └── labels.jsonl
+└── test/
+    ├── images/…
+    └── labels.jsonl
 ```
 
 | flag | default | meaning |
 |------|---------|---------|
-| `--n` | 100 | number of pairs to generate |
+| `--n` | 100 | total number of pairs to generate |
 | `--out` | `data` | output directory |
 | `--max-depth` | 4 | recursion depth bound |
 | `--seed` | 0 | RNG seed for reproducibility |
 | `--ppi` | 200 | render resolution (pixels per inch) |
-| `--unique` | off | skip duplicate label strings |
+| `--train-frac` | 0.8 | train split fraction |
+| `--val-frac` | 0.1 | val split fraction |
+| `--test-frac` | 0.1 | test split fraction |
+
+Labels are always deduplicated **before** splitting (a duplicate draw is
+re-sampled), so no formula string appears in more than one split — evaluation
+never sees a training label. The three
+fractions must sum to 1.0; for larger datasets `90/5/5`
+(`--train-frac 0.9 --val-frac 0.05 --test-frac 0.05`) gives more to training
+while still leaving thousands of eval examples.
 
 The same `--seed` reproduces the same dataset. The `data/` directory is
 gitignored — regenerate it rather than committing it.
+
+## Sanity-check the dataset
+
+Before training, eyeball that the rendered images actually match their labels.
+This builds a self-contained HTML page showing each formula next to its exact
+Typst string:
+
+Point `--data` at a single split directory (it holds the `labels.jsonl` +
+`images/` the tool needs):
+
+```bash
+python scripts/make_contact_sheet.py --data data/train
+# then open the page in a browser:
+xdg-open data/train/contact_sheet.html
+```
+
+Review a random subset instead of the whole set, or change how many formulas
+sit side by side:
+
+```bash
+python scripts/make_contact_sheet.py --data data/train --n 60 --cols 2
+```
+
+| flag | default | meaning |
+|------|---------|---------|
+| `--data` | `data` | split directory (holds `labels.jsonl` + `images/`) |
+| `--out` | `<data>/contact_sheet.html` | output HTML path |
+| `--n` | all | review a random sample of N pairs |
+| `--cols` | 2 | how many formulas side by side |
+| `--seed` | 0 | sampling seed |
+
+The HTML is written inside the split folder so the relative `images/...` paths
+resolve — don't move it out of that folder or the images won't load.
 
