@@ -46,6 +46,8 @@ def main() -> None:
     p.add_argument("--eval-samples", type=int, default=5,
                    help="how many train examples to decode after training")
     p.add_argument("--save", type=Path, default=None, help="optional dir to save the model")
+    p.add_argument("--save-every", type=int, default=5,
+                   help="checkpoint to --save every N epochs (0 disables)")
     args = p.parse_args()
 
     device = torch.device(args.device)
@@ -75,6 +77,13 @@ def main() -> None:
             optim.step()
             total += loss.item()
         print(f"  epoch {epoch:3d}  avg loss {total / len(loader):.4f}")
+
+        # Periodic checkpoint so a long CPU run isn't all-or-nothing on interrupt.
+        if args.save and args.save_every and epoch % args.save_every == 0 and epoch != args.epochs:
+            args.save.mkdir(parents=True, exist_ok=True)
+            model.save_pretrained(args.save)
+            tok.save(args.save / "tokenizer.json")
+            print(f"  [checkpoint] saved to {args.save} after epoch {epoch}")
 
     # --- did it actually learn? decode a few training examples ---------------
     model.eval()

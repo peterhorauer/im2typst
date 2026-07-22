@@ -19,7 +19,7 @@ First create the python environment
 gh repo clone peterhorauer/im2typst
 cd im2typst
 
-python -m venv .
+python -m venv ./venv
 ```
 
 Under Linux source the bin/activate with following command
@@ -37,7 +37,7 @@ python -m pip install --upgrade pip
 And install all dependencies
 ```bash
 pip3 install torch torchvision --index-url https://download.pytorch.org/whl/cpu
-pip install requirements.txt
+pip install -r requirements.txt
 ```
 
 # Generating training data
@@ -227,6 +227,7 @@ many decode back to the exact gold label (`Exact match: N/M`). See
 | `--device` | `cpu` | `cpu` or `cuda` |
 | `--eval-samples` | 5 | train examples to decode after training |
 | `--save` | none | optional directory to save the model + tokenizer |
+| `--save-every` | 5 | checkpoint to `--save` every N epochs (0 disables; final save always happens) |
 
 ## Full training
 
@@ -240,4 +241,18 @@ python scripts/train_model.py --data data --device cuda --n 8000 --epochs 10 --s
 CPU is fine for the overfit smoke test, but a real run over the full 8k train
 set wants a **cloud GPU (CUDA)** — an integrated GPU is not worth the ROCm
 setup. Move the run to Colab or a rented GPU for the full fit.
+
+## Predict with a saved checkpoint
+
+Once you have a `--save` directory (a checkpoint or the final model), run it on
+any single image — not just the train examples the eval loop checks:
+
+```bash
+python scripts/predict.py --model runs/trocr-v1 --image data/val/images/000000.png
+```
+
+It prints the predicted Typst string. `--trocr` must match whatever checkpoint
+you trained from (default `microsoft/trocr-small-printed`) since only the
+*image processor* is re-loaded from it — the trained weights come from
+`--model`.
 
