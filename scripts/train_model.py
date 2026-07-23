@@ -15,6 +15,8 @@ On CPU this is a smoke test, not a real training run — keep --n small.
 from __future__ import annotations
 
 import argparse
+import datetime
+import json
 import sys
 from pathlib import Path
 
@@ -33,6 +35,42 @@ from im2typst.model import (                       # noqa: E402
 from im2typst.tokenizer import CharTokenizer       # noqa: E402
 
 
+def _load_prior_runs(save_dir: Path) -> list[dict]:
+    """Prior run entries from a checkpoint's own log, so --resume chains append
+    rather than lose the history of commands/epochs that built the checkpoint."""
+    log_path = save_dir / "training_log.json"
+    if log_path.exists():
+        return json.loads(log_path.read_text())["runs"]
+    return []
+
+
+def _write_log(save_dir: Path, prior_runs: list[dict], run_entry: dict) -> None:
+    all_runs = prior_runs + [run_entry]
+    (save_dir / "training_log.json").write_text(json.dumps({"runs": all_runs}, indent=2))
+
+
+def _val_exact_match(model, val_dataset, val_loader, tok, device) -> tuple[int, int]:
+    """Generate predictions for the val subset and count exact matches.
+
+    Leaves the model in train() mode on return so the caller's training loop
+    doesn't need to remember to flip it back.
+    """
+    model.eval()
+    exact = 0
+    idx = 0
+    with torch.no_grad():
+        for batch in val_loader:
+            pixel_values = batch["pixel_values"].to(device)
+            gen = model.generate(pixel_values)
+            for g in gen:
+                pred = tok.decode(g.tolist())
+                gold = val_dataset.rows[idx]["typst"]
+                exact += pred == gold
+                idx += 1
+    model.train()
+    return exact, idx
+
+
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -46,6 +84,10 @@ def main() -> None:
     p.add_argument("--device", default="cpu", help="cpu or cuda")
     p.add_argument("--eval-samples", type=int, default=5,
                    help="how many train examples to decode after training")
+    p.add_argument("--val-n", type=int, default=50,
+                   help="how many val examples to check each epoch for exact-match (0 disables)")
+    p.add_argument("--val-every", type=int, default=1,
+                   help="run the val exact-match check every N epochs (0 disables)")
     p.add_argument("--save", type=Path, default=None, help="optional dir to save the model")
     p.add_argument("--save-every", type=int, default=5,
                    help="checkpoint to --save every N epochs (0 disables)")
@@ -57,6 +99,8 @@ def main() -> None:
     device = torch.device(args.device)
     image_processor = load_image_processor(args.trocr)
 
+    prior_runs: list[dict] = []
+    cumulative_epochs = 0
     if args.resume:
         # Load the checkpoint's own tokenizer, not data/tokenizer.json — the
         # decoder's embedding/lm_head rows were sized to (and trained on) this
@@ -64,6 +108,9 @@ def main() -> None:
         print(f"Resuming from checkpoint {args.resume}…")
         tok = CharTokenizer.load(args.resume / "tokenizer.json")
         model = VisionEncoderDecoderModel.from_pretrained(args.resume).to(device)
+        prior_runs = _load_prior_runs(args.resume)
+        if prior_runs:
+            cumulative_epochs = prior_runs[-1]["cumulative_epochs"]
     else:
         tok = CharTokenizer.load(args.data / "tokenizer.json")
         print(f"Loading TrOCR ({args.trocr}) + resizing decoder to vocab {tok.vocab_size}…")
@@ -75,7 +122,21 @@ def main() -> None:
     print(f"Overfitting {len(dataset)} examples for {args.epochs} epochs "
           f"on {device}.")
 
+    val_dataset = val_loader = None
+    if args.val_n and args.val_every:
+        val_dataset = FormulaDataset(args.data / "val", tok, image_processor,
+                                     max_length=args.max_length, limit=args.val_n)
+        if len(val_dataset) > 0:
+            val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False)
+            print(f"Checking val exact-match on {len(val_dataset)} examples "
+                  f"every {args.val_every} epoch(s).")
+        else:
+            val_dataset = None
+
     optim = torch.optim.AdamW(model.parameters(), lr=args.lr)
+    started_at = datetime.datetime.now().isoformat(timespec="seconds")
+    loss_history: list[float] = []
+    val_history: list[dict] = []
 
     model.train()
     for epoch in range(1, args.epochs + 1):
@@ -88,13 +149,39 @@ def main() -> None:
             loss.backward()
             optim.step()
             total += loss.item()
-        print(f"  epoch {epoch:3d}  avg loss {total / len(loader):.4f}")
+        avg_loss = total / len(loader)
+        loss_history.append(avg_loss)
+
+        val_str = ""
+        if val_loader is not None and epoch % args.val_every == 0:
+            v_exact, v_total = _val_exact_match(model, val_dataset, val_loader, tok, device)
+            val_history.append({"epoch": epoch, "exact": v_exact, "total": v_total})
+            val_str = f"  val exact {v_exact}/{v_total} ({100 * v_exact / v_total:.1f}%)"
+        print(f"  epoch {epoch:3d}  avg loss {avg_loss:.4f}{val_str}")
 
         # Periodic checkpoint so a long CPU run isn't all-or-nothing on interrupt.
         if args.save and args.save_every and epoch % args.save_every == 0 and epoch != args.epochs:
             args.save.mkdir(parents=True, exist_ok=True)
             model.save_pretrained(args.save)
             tok.save(args.save / "tokenizer.json")
+            _write_log(args.save, prior_runs, {
+                "timestamp": started_at,
+                "command": " ".join(sys.argv),
+                "resumed_from": str(args.resume) if args.resume else None,
+                "n_train": len(dataset),
+                "epochs_this_run": epoch,
+                "epochs_this_run_planned": args.epochs,
+                "cumulative_epochs": cumulative_epochs + epoch,
+                "batch_size": args.batch_size,
+                "lr": args.lr,
+                "max_length": args.max_length,
+                "trocr": args.trocr,
+                "device": str(device),
+                "loss_per_epoch": loss_history,
+                "val_n": args.val_n,
+                "val_exact_match_per_epoch": val_history,
+                "status": "interrupted-or-in-progress",
+            })
             print(f"  [checkpoint] saved to {args.save} after epoch {epoch}")
 
     # --- did it actually learn? decode a few training examples ---------------
@@ -120,7 +207,26 @@ def main() -> None:
         args.save.mkdir(parents=True, exist_ok=True)
         model.save_pretrained(args.save)
         tok.save(args.save / "tokenizer.json")
-        print(f"Saved model + tokenizer to {args.save}")
+        n_eval = min(args.eval_samples, len(dataset))
+        _write_log(args.save, prior_runs, {
+            "timestamp": started_at,
+            "command": " ".join(sys.argv),
+            "resumed_from": str(args.resume) if args.resume else None,
+            "n_train": len(dataset),
+            "epochs_this_run": args.epochs,
+            "cumulative_epochs": cumulative_epochs + args.epochs,
+            "batch_size": args.batch_size,
+            "lr": args.lr,
+            "max_length": args.max_length,
+            "trocr": args.trocr,
+            "device": str(device),
+            "loss_per_epoch": loss_history,
+            "val_n": args.val_n,
+            "val_exact_match_per_epoch": val_history,
+            "train_eval_exact_match": f"{exact}/{n_eval}",
+            "status": "complete",
+        })
+        print(f"Saved model + tokenizer + training_log.json to {args.save}")
 
 
 if __name__ == "__main__":

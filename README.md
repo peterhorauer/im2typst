@@ -215,6 +215,19 @@ prints the per-epoch loss, then generates a few train images and reports how
 many decode back to the exact gold label (`Exact match: N/M`). See
 [TRAINING.md](TRAINING.md) for the milestone-1 result and what comes next.
 
+Each epoch also runs a **val exact-match check** (on the `val` split, disjoint
+from train) and prints it next to the loss:
+
+```
+  epoch  12  avg loss 0.1830  val exact 3/50 (6.0%)
+```
+
+This is the earliest signal for a train/val gap: if train loss keeps dropping
+while val exact-match stalls or the two epoch-over-epoch trends diverge,
+that's overfitting to watch for *during* the run instead of only discovering
+it afterwards with `evaluate.py`. Both the per-epoch loss and val exact-match
+history are also written to `training_log.json` (see below).
+
 | flag | default | meaning |
 |------|---------|---------|
 | `--data` | `data` | dataset directory (needs `train/` + `tokenizer.json`) |
@@ -226,9 +239,23 @@ many decode back to the exact gold label (`Exact match: N/M`). See
 | `--trocr` | `microsoft/trocr-small-printed` | pretrained encoder/decoder checkpoint |
 | `--device` | `cpu` | `cpu` or `cuda` |
 | `--eval-samples` | 5 | train examples to decode after training |
+| `--val-n` | 50 | val examples to check exact-match on each epoch (0 disables) |
+| `--val-every` | 1 | run the val check every N epochs (0 disables) |
 | `--save` | none | optional directory to save the model + tokenizer |
 | `--save-every` | 5 | checkpoint to `--save` every N epochs (0 disables; final save always happens) |
 | `--resume` | none | continue training from a checkpoint dir saved by `--save`, instead of starting over from the pretrained TrOCR checkpoint |
+
+Every `--save` also writes **`training_log.json`** next to the model — a list
+of every training invocation that built the checkpoint: the exact command line,
+timestamp, hyperparameters, per-epoch loss, per-epoch val exact-match, and (on
+completion) the final train exact-match. `--resume` appends to this list
+rather than replacing it, so a checkpoint's full training history — how many
+epochs total, across how many separate runs, and what the loss/val curves
+looked like each time — is readable straight from the file, e.g.:
+
+```bash
+python -m json.tool runs/milestone3/training_log.json
+```
 
 ## Continuing training from a checkpoint
 
