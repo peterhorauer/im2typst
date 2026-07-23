@@ -21,6 +21,7 @@ from pathlib import Path
 import torch
 from torch.utils.data import DataLoader
 from tqdm import tqdm
+from transformers import VisionEncoderDecoderModel
 
 # Make the repo root importable when run as a plain script.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -48,14 +49,25 @@ def main() -> None:
     p.add_argument("--save", type=Path, default=None, help="optional dir to save the model")
     p.add_argument("--save-every", type=int, default=5,
                    help="checkpoint to --save every N epochs (0 disables)")
+    p.add_argument("--resume", type=Path, default=None,
+                   help="continue training from a checkpoint dir saved by --save, "
+                        "instead of starting over from the pretrained TrOCR checkpoint")
     args = p.parse_args()
 
     device = torch.device(args.device)
-    tok = CharTokenizer.load(args.data / "tokenizer.json")
-
-    print(f"Loading TrOCR ({args.trocr}) + resizing decoder to vocab {tok.vocab_size}…")
     image_processor = load_image_processor(args.trocr)
-    model = build_model(tok, args.trocr, max_length=args.max_length).to(device)
+
+    if args.resume:
+        # Load the checkpoint's own tokenizer, not data/tokenizer.json — the
+        # decoder's embedding/lm_head rows were sized to (and trained on) this
+        # exact vocab, so IDs must come from the same file to stay aligned.
+        print(f"Resuming from checkpoint {args.resume}…")
+        tok = CharTokenizer.load(args.resume / "tokenizer.json")
+        model = VisionEncoderDecoderModel.from_pretrained(args.resume).to(device)
+    else:
+        tok = CharTokenizer.load(args.data / "tokenizer.json")
+        print(f"Loading TrOCR ({args.trocr}) + resizing decoder to vocab {tok.vocab_size}…")
+        model = build_model(tok, args.trocr, max_length=args.max_length).to(device)
 
     dataset = FormulaDataset(args.data / "train", tok, image_processor,
                              max_length=args.max_length, limit=args.n)

@@ -121,7 +121,7 @@ Point `--data` at a single split directory (it holds the `labels.jsonl` +
 ```bash
 python scripts/make_contact_sheet.py --data data/train
 # then open the page in a browser:
-xdg-open data/train/contact_sheet.html
+firefox data/train/contact_sheet.html
 ```
 
 Review a random subset instead of the whole set, or change how many formulas
@@ -228,6 +228,26 @@ many decode back to the exact gold label (`Exact match: N/M`). See
 | `--eval-samples` | 5 | train examples to decode after training |
 | `--save` | none | optional directory to save the model + tokenizer |
 | `--save-every` | 5 | checkpoint to `--save` every N epochs (0 disables; final save always happens) |
+| `--resume` | none | continue training from a checkpoint dir saved by `--save`, instead of starting over from the pretrained TrOCR checkpoint |
+
+## Continuing training from a checkpoint
+
+If a run didn't train long enough (loss still high, near-misses like a dropped
+`(` or a confused Greek letter), you don't need to start over from the
+pretrained TrOCR checkpoint — resume from the saved model and keep going:
+
+```bash
+python scripts/train_model.py --data data --device cuda --n 400 --epochs 20 \
+  --resume runs/milestone3 --save runs/milestone3
+```
+
+`--resume` loads the saved weights *and* that checkpoint's own `tokenizer.json`
+(not `data/tokenizer.json`) so the decoder's vocab stays aligned with what it
+was trained on. Point `--save` at the same directory to keep checkpointing in
+place, or a new one to branch off. Note the optimizer state (Adam moments) is
+not saved/restored, so the first few resumed epochs behave like a warm restart
+rather than a perfectly seamless continuation — this is normal and still far
+cheaper than retraining from the pretrained checkpoint.
 
 ## Full training
 
@@ -255,4 +275,29 @@ It prints the predicted Typst string. `--trocr` must match whatever checkpoint
 you trained from (default `microsoft/trocr-small-printed`) since only the
 *image processor* is re-loaded from it — the trained weights come from
 `--model`.
+
+## Evaluate on a split (val/test)
+
+`predict.py` only handles one image; to check generalization, run the
+checkpoint over an entire held-out split and get an exact-match score:
+
+```bash
+python scripts/evaluate.py --model runs/milestone2 --data data --split val
+```
+
+It prints `Exact match: N/M (xx.x%)` plus a handful of gold/pred mismatches to
+eyeball (`--show-mismatches`, default 10). Use `--split test` for the final
+check, `--n` to cap how many examples to evaluate, and `--batch-size` to trade
+memory for speed on GPU.
+
+| flag | default | meaning |
+|------|---------|---------|
+| `--model` | *required* | checkpoint dir saved by `train_model.py --save` |
+| `--data` | `data` | dataset directory (holds `train/ val/ test/`) |
+| `--split` | `val` | which split to evaluate (`train`, `val`, `test`) |
+| `--trocr` | `microsoft/trocr-small-printed` | must match the checkpoint's training run |
+| `--device` | `cpu` | `cpu` or `cuda` |
+| `--batch-size` | 8 | examples generated per batch |
+| `--n` | all | limit to the first N examples |
+| `--show-mismatches` | 10 | how many gold/pred mismatches to print |
 

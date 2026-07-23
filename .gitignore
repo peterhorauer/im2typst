@@ -222,3 +222,6 @@ __marimo__/
 
 # Generated synthetic dataset
 data/
+
+# Model checkpoints (large binary weights — don't belong in git history)
+runs/
