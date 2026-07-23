@@ -28,18 +28,23 @@ This file tracks the model-training approach, the milestone ladder, results so f
 - **Verdict:** expected for this milestone, not a bug. With only 50 train examples and 200 epochs, the model memorized those specific images rather than learning to generalize — there's no pressure to learn anything beyond a near lookup-table mapping, so total failure on unseen images is the normal outcome. Double-checked `predict.py`/`evaluate.py` load the same checkpoint + tokenizer consistently, ruling out an eval-script bug.
 - **Next:** Milestone 3 — train on the full train split (not an overfit subset) with moderate epochs and re-check val exact-match. Note the dataset is currently only 500 images (400 train) — well below the 10k–100k scale TRAINING.md calls for, so real generalization likely needs a bigger generated dataset even after Milestone 3.
 
-### Milestone 3 — First real run (generalization) ⚠️ partial result (2026-07-23) — data-scale bottleneck confirmed
+### Milestone 3 — First real run (generalization) ✅ done (2026-07-23)
 
 - **Goal:** train on the full train split and measure generalization on the held-out **val** split.
-- **Setup:** 400 train examples (the full train split of the current 500-image dataset), CUDA, `trocr-small-printed`, `runs/milestone3`. Trained 30 epochs, then resumed (`--resume`) for 30 more — 60 epochs total.
+
+**Attempt 1 — 400 examples, data-scale bottleneck found:**
+- **Setup:** 400 train examples (the full train split of the then-current 500-image dataset), CUDA, `trocr-small-printed`, `runs/milestone3`. Trained 30 epochs, then resumed (`--resume`) for 30 more — 60 epochs total.
 - **Result:** loss **0.3 → 0.09**. `scripts/evaluate.py` on **train**: 31/50 exact match. On **val**: 1/50 exact match, with the remaining mismatches visibly closer (fewer/smaller errors) than Milestone 2's "wildly off" predictions.
-- **Verdict:** this is an **overfitting signature**, not an epoch-starved one — train performance (62%) is far ahead of val (2%), and it's widening as training continues. With only 400 train examples (well below the 10k–100k scale this doc has flagged twice already), more epochs on this same set will likely keep improving train exact-match while val stays flat or degrades — diminishing, and eventually negative, returns. Root cause is **dataset size/diversity**, not training duration.
-- **Next:** don't keep grinding epochs on the 400-example set. Generate a much larger dataset (thousands of examples) and rerun Milestone 3 on that — this is the real fix. Also worth adding a proper **per-epoch val exact-match check** to `train_model.py` (currently only final train-set decode is reported) so this train/val divergence is visible *during* a run instead of only after the fact.
-- **Requires (not yet built):**
-  - a **validation loop** (val loss + exact-match each epoch) — the current script is train-only,
-  - **checkpointing** / keep-best-model.
-- **Strategy:** GPU (CUDA); batch 16–32; 10–30 epochs; linear/cosine warmup; track val exact-match and early-stop on it. Move to `trocr-base` if underfitting.
-- **Success:** high val exact-match on labels never seen in training.
+- **Verdict:** an **overfitting signature**, not an epoch-starved one — train performance (62%) far ahead of val (2%), widening as training continued. Root cause diagnosed as **dataset size/diversity** (only 400 train, well below the 10k–100k target), not training duration.
+
+**Attempt 2 — 9,000 examples, fix confirmed:**
+- **Setup:** 9,000 train examples, CUDA, `trocr-small-printed`, batch size 8 (16 OOM'd on the 3.63 GiB GPU), 15 epochs, `runs/milestone3-full`.
+- **Result:** loss **1.58 → 0.026**, still falling at epoch 15. Val exact-match rose 0% → peaked **92% (epoch 13)**, ending **86% (epoch 15)**. Final check on the held-out **test** split (`scripts/evaluate.py --split test`): **416/500 exact match (83.2%)**.
+- **Verdict:** confirms the Attempt 1 diagnosis — scaling train data 400 → 9,000 fixed the overfitting; val/test now track train instead of being "wildly off". Train loss kept improving through epoch 15 while val oscillated in the 74–92% band from epoch 8 on — a generalization plateau for this data size/epoch count, not a regression.
+- **Note:** this run predates the keep-best-checkpoint feature, so the saved checkpoint is just epoch 15 (86% val) rather than the true best epoch seen (epoch 13, 92% val). Future runs auto-preserve the best epoch via `--save`.
+- **Success criterion met:** high val/test exact-match (83–92%) on labels never seen in training.
+- **Built along the way (previously listed as "not yet built"):** per-epoch **val loss + exact-match + CER** check, gradient-norm/LR logging, **keep-best checkpointing** (auto-enabled with `--save`), and `scripts/plot_training.py` for visualizing `training_log.json`.
+- **Next:** Milestone 4 — augment the dataset (fonts, sizes, noise, rotation via `RenderOptions`) so the model generalizes beyond clean synthetic renders to real screenshots, and add the render-match/BLEU metrics.
 
 ### Milestone 4 — Evaluation & robustness (roadmap step 5)
 
@@ -72,4 +77,5 @@ Record per run: dataset seed, TrOCR checkpoint, lr, batch size, epochs, and the 
 |------|-----------|-------|------|--------|--------|
 | 2026-07-13 | 1 — overfit smoke test | trocr-small-printed | 16 train | 80 | loss 0.28, 3/8 exact (near-misses) |
 | 2026-07-22 | 2 — clean overfit | trocr-small-printed | 50 train (500-image set) | 200 | train: exact match; val (50): 0/50, wildly off — expected (pure memorization, no generalization pressure) |
-| 2026-07-23 | 3 — first real run (partial) | trocr-small-printed | 400 train (full split, 500-image set) | 60 (30 + 30 resumed) | loss 0.3→0.09; train 31/50 exact; val 1/50 exact — overfitting signature, dataset too small, not epoch-starved |
+| 2026-07-23 | 3 — first real run, attempt 1 | trocr-small-printed | 400 train (full split, 500-image set) | 60 (30 + 30 resumed) | loss 0.3→0.09; train 31/50 exact; val 1/50 exact — overfitting signature, dataset too small, not epoch-starved |
+| 2026-07-23 | 3 — first real run, attempt 2 | trocr-small-printed | 9,000 train | 15 | loss 1.58→0.026; val exact-match 0%→92% (peak epoch 13), 86% at epoch 15; **test 416/500 (83.2%)** — data-scale fix confirmed |

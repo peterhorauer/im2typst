@@ -215,18 +215,32 @@ prints the per-epoch loss, then generates a few train images and reports how
 many decode back to the exact gold label (`Exact match: N/M`). See
 [TRAINING.md](TRAINING.md) for the milestone-1 result and what comes next.
 
-Each epoch also runs a **val exact-match check** (on the `val` split, disjoint
-from train) and prints it next to the loss:
+Each epoch also runs a **val check** (loss, exact-match, and CER on the `val`
+split, disjoint from train) and prints it next to the train loss, gradient
+norm, and learning rate:
 
 ```
-  epoch  12  avg loss 0.1830  val exact 3/50 (6.0%)
+  epoch  12  avg loss 0.1830  grad_norm 2.1140  lr 5.00e-05  val loss 2.9412  val exact 3/50 (6.0%)  val CER 0.4118
 ```
 
-This is the earliest signal for a train/val gap: if train loss keeps dropping
-while val exact-match stalls or the two epoch-over-epoch trends diverge,
-that's overfitting to watch for *during* the run instead of only discovering
-it afterwards with `evaluate.py`. Both the per-epoch loss and val exact-match
-history are also written to `training_log.json` (see below).
+- **val loss vs train loss** is the earliest signal for a train/val gap — a
+  continuous number, so it shows overfitting starting several epochs before
+  val exact-match (all-or-nothing per sequence) would reveal anything.
+- **val CER** (character error rate — `im2typst/metrics.py`, Levenshtein edit
+  distance normalized by gold length) scores *how close* a wrong prediction
+  was instead of pass/fail, which matters since near-misses (one dropped
+  character, a confused Greek letter) look identical to total garbage under
+  exact-match alone.
+- **grad_norm** is the gradient's norm before any clipping (nothing is
+  actually clipped here) — a free signal for training instability; a sudden
+  spike usually means something's off.
+- **lr** is just the optimizer's current learning rate — constant today since
+  there's no scheduler yet, logged so a future warmup/decay schedule has
+  somewhere to show up.
+
+All of these (loss, grad norm, lr, and the full val breakdown) are per-epoch
+histories written to `training_log.json` (see below), so a training run can
+be plotted after the fact, not just read off stdout.
 
 | flag | default | meaning |
 |------|---------|---------|
@@ -237,9 +251,9 @@ history are also written to `training_log.json` (see below).
 | `--lr` | 5e-5 | AdamW learning rate |
 | `--max-length` | 128 | decoder max sequence length |
 | `--trocr` | `microsoft/trocr-small-printed` | pretrained encoder/decoder checkpoint |
-| `--device` | `cpu` | `cpu` or `cuda` |
-| `--eval-samples` | 5 | train examples to decode after training |
-| `--val-n` | 50 | val examples to check exact-match on each epoch (0 disables) |
+| `--device` | `cuda` | `cpu` or `cuda` |
+| `--eval-samples` | 10 | train examples to decode after training |
+| `--val-n` | 100 | val examples to check exact-match on each epoch (0 disables) |
 | `--val-every` | 1 | run the val check every N epochs (0 disables) |
 | `--save` | none | optional directory to save the model + tokenizer |
 | `--save-every` | 5 | checkpoint to `--save` every N epochs (0 disables; final save always happens) |
@@ -247,15 +261,34 @@ history are also written to `training_log.json` (see below).
 
 Every `--save` also writes **`training_log.json`** next to the model — a list
 of every training invocation that built the checkpoint: the exact command line,
-timestamp, hyperparameters, per-epoch loss, per-epoch val exact-match, and (on
-completion) the final train exact-match. `--resume` appends to this list
-rather than replacing it, so a checkpoint's full training history — how many
-epochs total, across how many separate runs, and what the loss/val curves
-looked like each time — is readable straight from the file, e.g.:
+timestamp, hyperparameters, and per-epoch histories for loss, gradient norm,
+learning rate, and val (loss/exact-match/CER), plus (on completion) the final
+train exact-match. `--resume` appends to this list rather than replacing it,
+so a checkpoint's full training history — how many epochs total, across how
+many separate runs, and what every curve looked like each time — is readable
+straight from the file, e.g.:
 
 ```bash
 python -m json.tool runs/milestone3/training_log.json
 ```
+
+### Keep-best checkpoint
+
+Whenever `--save` is set (no extra flag needed) and the val check is active,
+the epoch with the best-so-far val exact-match fraction is also saved
+separately to **`<save>/best/`** (model + tokenizer + a `best_info.json` with
+the epoch, val loss/exact-match/CER that earned it, and a timestamp). This
+protects against exactly the failure mode where training regresses after a
+good epoch (overfitting, noise, or otherwise) and `--save-every`'s periodic
+snapshot lands on a worse epoch than one you already passed:
+
+```bash
+python -m json.tool runs/milestone3-full/best/best_info.json
+```
+
+`--resume` carries the best-so-far fraction forward from the checkpoint
+you're resuming from, so it keeps comparing against the true best across the
+whole lineage, not just the current invocation.
 
 ## Continuing training from a checkpoint
 
@@ -312,7 +345,9 @@ checkpoint over an entire held-out split and get an exact-match score:
 python scripts/evaluate.py --model runs/milestone2 --data data --split val
 ```
 
-It prints `Exact match: N/M (xx.x%)` plus a handful of gold/pred mismatches to
+It prints `Exact match: N/M (xx.x%)` and `Mean CER` (character error rate —
+edit distance normalized by gold length; 0 = perfect, closer to 1 = further
+off), plus a handful of gold/pred mismatches with their individual CER to
 eyeball (`--show-mismatches`, default 10). Use `--split test` for the final
 check, `--n` to cap how many examples to evaluate, and `--batch-size` to trade
 memory for speed on GPU.
@@ -323,8 +358,26 @@ memory for speed on GPU.
 | `--data` | `data` | dataset directory (holds `train/ val/ test/`) |
 | `--split` | `val` | which split to evaluate (`train`, `val`, `test`) |
 | `--trocr` | `microsoft/trocr-small-printed` | must match the checkpoint's training run |
-| `--device` | `cpu` | `cpu` or `cuda` |
+| `--device` | `cuda` | `cpu` or `cuda` |
 | `--batch-size` | 8 | examples generated per batch |
 | `--n` | all | limit to the first N examples |
 | `--show-mismatches` | 10 | how many gold/pred mismatches to print |
+
+## Plot training curves
+
+`training_log.json` (written whenever `train_model.py` is run with `--save`)
+records per-epoch loss, gradient norm, learning rate, and val loss/exact-match/CER.
+Render it to a PNG:
+
+```bash
+python scripts/plot_training.py --log runs/milestone3-full/training_log.json
+```
+
+Saves `training_plot.png` next to the log (override with `--out`) with five
+panels: train+val loss, val exact-match %, val CER, gradient norm, and
+learning rate — each on its own axis rather than sharing one plot, since their
+scales (loss ~0.1-8, grad norm ~1-50, lr ~1e-5) would otherwise flatten the
+smaller ones to invisible lines. The script reconstructs a single continuous
+x-axis across `--save-every` checkpoints and `--resume` chains automatically,
+so you don't need to run it once per invocation.
 

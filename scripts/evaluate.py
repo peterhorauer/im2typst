@@ -24,6 +24,7 @@ from transformers import VisionEncoderDecoderModel
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from im2typst.data import FormulaDataset                          # noqa: E402
+from im2typst.metrics import cer                                  # noqa: E402
 from im2typst.model import DEFAULT_TROCR, load_image_processor    # noqa: E402
 from im2typst.tokenizer import CharTokenizer                       # noqa: E402
 
@@ -37,7 +38,7 @@ def main() -> None:
     p.add_argument("--split", default="val", choices=["train", "val", "test"])
     p.add_argument("--trocr", default=DEFAULT_TROCR,
                    help="checkpoint the image processor comes from (must match training)")
-    p.add_argument("--device", default="cpu", help="cpu or cuda")
+    p.add_argument("--device", default="cuda", help="cpu or cuda")
     p.add_argument("--batch-size", type=int, default=8)
     p.add_argument("--n", type=int, default=None, help="limit to first N examples")
     p.add_argument("--show-mismatches", type=int, default=10,
@@ -56,6 +57,7 @@ def main() -> None:
 
     exact = 0
     total = 0
+    total_cer = 0.0
     mismatches = []
     idx = 0
     with torch.no_grad():
@@ -65,19 +67,23 @@ def main() -> None:
             for g in gen:
                 pred = tok.decode(g.tolist())
                 gold = dataset.rows[idx]["typst"]
+                example_cer = cer(gold, pred)
+                total_cer += example_cer
                 if pred == gold:
                     exact += 1
                 elif len(mismatches) < args.show_mismatches:
-                    mismatches.append((gold, pred))
+                    mismatches.append((gold, pred, example_cer))
                 total += 1
                 idx += 1
 
     print(f"\nExact match: {exact}/{total} ({100 * exact / total:.1f}%)")
+    print(f"Mean CER:    {total_cer / total:.4f}  (0 = perfect, 1 = fully wrong length-for-length)")
     if mismatches:
         print(f"\nFirst {len(mismatches)} mismatches:")
-        for gold, pred in mismatches:
+        for gold, pred, example_cer in mismatches:
             print(f"  gold: {gold}")
             print(f"  pred: {pred}")
+            print(f"  CER:  {example_cer:.4f}")
             print()
 
 
